@@ -26,7 +26,7 @@
 
 产物：`mithka-<版本>-android-arm64-v8a.apk` 与 `...-armeabi-v7a.apk`，外加 `update.json`（含每个包的 SHA-256）。
 
-## 必须配置的 Secrets
+## Secrets
 
 | Secret | 说明 |
 | :--- | :--- |
@@ -37,7 +37,9 @@
 | `TELEGRAM_API_ID` | 自己的 api_id，https://my.telegram.org 申请 |
 | `TELEGRAM_API_HASH` | 对应的 api_hash |
 
-`TELEGRAM_API_ID` / `TELEGRAM_API_HASH` 缺失时仍会构建，但 App 无法登录，产物会发成 **pre-release**：可以手动下载，App 的更新检查读的是 `releases/latest`，不会提示这种包。
+`TELEGRAM_API_ID` / `TELEGRAM_API_HASH` 是**可选**的，跟更新无关——它只是 App 连 Telegram 服务端的身份。不填也能正常构建发版：装上去之后在登录页点「配置自定义 API」（`lib/auth/login_view.dart` → `ApiCredentialsView`）填一次就行。填在 Secrets 里的好处是包内自带，换设备不用再手输。
+
+申请地址：https://my.telegram.org → API development tools。
 
 ## 包名的两个后果
 
