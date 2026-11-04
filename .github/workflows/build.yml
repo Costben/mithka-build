@@ -182,6 +182,11 @@ jobs:
               "ARCH_X86_64 to 4": "ARCH_X86_64 to 0",
           }
           for old, new in replacements.items():
+              # The Flutter SDK is restored from the action cache, which may
+              # already hold a patched copy from a previous run.
+              if new in text and old not in text:
+                  print(f"already patched: {old}")
+                  continue
               if old not in text:
                   raise SystemExit(f"Could not find {old!r} in {path}")
               text = text.replace(old, new, 1)
