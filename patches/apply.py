@@ -123,6 +123,27 @@ List<int> _components(String version) {
     write(path, text)
 
 
+def patch_about_links(src: pathlib.Path, owner: str, repo: str) -> None:
+    """Point the About page's GitHub row at the repository that ships updates.
+
+    Cosmetic only, so a shape change upstream is a no-op rather than a build
+    failure.
+    """
+    path = src / "lib/settings/about_view.dart"
+    if not path.is_file():
+        return
+    text = read(path)
+    updated = text.replace(
+        "_githubUrl = 'https://github.com/iebb/mithka'",
+        f"_githubUrl = 'https://github.com/{owner}/{repo}'",
+    ).replace(
+        "value: 'github.com/iebb/mithka'",
+        f"value: 'github.com/{owner}/{repo}'",
+    )
+    if updated != text:
+        write(path, updated)
+
+
 def patch_update_checker(src: pathlib.Path) -> None:
     path = src / "lib/update/update_checker.dart"
     text = read(path)
@@ -221,6 +242,7 @@ def main() -> int:
         patch_application_id(src, args.application_id)
         patch_manifest_label(src, args.app_name)
         patch_release_feed(src, args.update_owner, args.update_repo)
+        patch_about_links(src, args.update_owner, args.update_repo)
         patch_update_checker(src)
         write_version_code(src, args.version_code)
     except PatchError as error:
