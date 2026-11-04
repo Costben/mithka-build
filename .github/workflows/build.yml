@@ -301,7 +301,9 @@ jobs:
   release:
     name: Publish
     needs: [resolve, build]
-    if: needs.resolve.outputs.skip != 'true' && needs.resolve.outputs.has_credentials == 'true'
+    if: >-
+      needs.resolve.outputs.skip != 'true' &&
+      (github.event_name != 'workflow_dispatch' || inputs.publish)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -345,14 +347,29 @@ jobs:
           BUILD_NAME: ${{ needs.resolve.outputs.build_name }}
           UPSTREAM_REF: ${{ needs.resolve.outputs.upstream_ref }}
           APPLICATION_ID: ${{ needs.resolve.outputs.application_id }}
+          HAS_CREDENTIALS: ${{ needs.resolve.outputs.has_credentials }}
         run: |
           set -euo pipefail
           notes="$(printf '%s\n' \
             "- 基于 \`$UPSTREAM_REF\` 构建" \
             "- 包名 \`$APPLICATION_ID\`" \
             "- 应用内可直接下载并安装本次更新")"
-          gh release create "v$BUILD_NAME" \
-            --title "Mithka $BUILD_NAME" \
-            --notes "$notes" \
-            --latest \
-            dist/*.apk dist/update.json
+
+          # Without Telegram API credentials the package builds but cannot log
+          # in, so it is published as a pre-release: downloadable for checking
+          # and installable by hand, but invisible to the app's update check,
+          # which reads releases/latest.
+          if [ "$HAS_CREDENTIALS" = "true" ]; then
+            gh release create "v$BUILD_NAME" \
+              --title "Mithka $BUILD_NAME" \
+              --notes "$notes" \
+              --latest \
+              dist/*.apk dist/update.json
+          else
+            echo "::warning::no TELEGRAM_API_ID / TELEGRAM_API_HASH; publishing as pre-release"
+            gh release create "v$BUILD_NAME" \
+              --title "Mithka $BUILD_NAME (no API credentials)" \
+              --notes "$notes" \
+              --prerelease \
+              dist/*.apk dist/update.json
+          fi

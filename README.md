@@ -37,7 +37,7 @@
 | `TELEGRAM_API_ID` | 自己的 api_id，https://my.telegram.org 申请 |
 | `TELEGRAM_API_HASH` | 对应的 api_hash |
 
-`TELEGRAM_API_ID` / `TELEGRAM_API_HASH` 缺失时仍会构建，但 App 无法登录，并且**不会**发布 Release（避免自动构建推一个用不了的包上去）。
+`TELEGRAM_API_ID` / `TELEGRAM_API_HASH` 缺失时仍会构建，但 App 无法登录，产物会发成 **pre-release**：可以手动下载，App 的更新检查读的是 `releases/latest`，不会提示这种包。
 
 ## 包名的两个后果
 
