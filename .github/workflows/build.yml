@@ -1,0 +1,358 @@
+name: Build APK
+
+# Builds iebb/mithka from source with this repo's packaging, signs it with this
+# repo's key, and publishes it here so the app can update itself from these
+# releases instead of the upstream repository.
+
+on:
+  schedule:
+    # Daily look at the upstream stable channel; the build only runs when the
+    # upstream tag has not been built yet.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 'Upstream tag / branch / sha (empty = newest upstream stable release)'
+        required: false
+        default: ''
+      application_id:
+        description: 'APK applicationId'
+        required: false
+        default: 'org.telegram.messenger'
+      app_name:
+        description: 'Launcher label'
+        required: false
+        default: 'Mithka'
+      publish:
+        description: 'Create a GitHub release from the result'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: '3.44.2'
+  UPSTREAM_REPO: 'iebb/mithka'
+  DEFAULT_APPLICATION_ID: 'org.telegram.messenger'
+  DEFAULT_APP_NAME: 'Mithka'
+
+jobs:
+  resolve:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_ref: ${{ steps.plan.outputs.upstream_ref }}
+      version: ${{ steps.plan.outputs.version }}
+      build_name: ${{ steps.plan.outputs.build_name }}
+      version_code: ${{ steps.plan.outputs.version_code }}
+      application_id: ${{ steps.plan.outputs.application_id }}
+      app_name: ${{ steps.plan.outputs.app_name }}
+      skip: ${{ steps.plan.outputs.skip }}
+      has_credentials: ${{ steps.plan.outputs.has_credentials }}
+    steps:
+      - name: Work out what to build
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_REF: ${{ inputs.upstream_ref }}
+          INPUT_APPLICATION_ID: ${{ inputs.application_id }}
+          INPUT_APP_NAME: ${{ inputs.app_name }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          set -euo pipefail
+
+          application_id="${INPUT_APPLICATION_ID:-$DEFAULT_APPLICATION_ID}"
+          app_name="${INPUT_APP_NAME:-$DEFAULT_APP_NAME}"
+
+          ref="${INPUT_REF:-}"
+          if [ -z "$ref" ]; then
+            ref="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)"
+          fi
+          [ -n "$ref" ] || { echo "could not resolve an upstream ref" >&2; exit 1; }
+
+          # v1.10.3 -> 1.10.3 ; v1.11.0-nightly.20261104.99c4dd4 -> 1.11.0
+          version="${ref#v}"
+          version="${version%%-*}"
+
+          # Every build of the same upstream version gets its own sequence
+          # number, so a rebuilt or re-patched package is still newer than the
+          # install it replaces.
+          tags="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name' || true)"
+          seq=0
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            case "$tag" in
+              "v$version".*)
+                suffix="${tag#"v$version".}"
+                case "$suffix" in
+                  ''|*[!0-9]*) continue ;;
+                esac
+                if [ "$suffix" -gt "$seq" ]; then seq="$suffix"; fi
+                ;;
+            esac
+          done <<< "$tags"
+
+          build_name="$version.$((seq + 1))"
+
+          skip=false
+          if [ -z "${INPUT_REF:-}" ] && [ "$seq" -gt 0 ]; then
+            echo "upstream $ref already built as v$version.$seq; nothing to do"
+            skip=true
+          fi
+
+          # 1.9e9 keeps every build far above any code the sequence could ever
+          # reach, and run_number only ever grows.
+          version_code=$((1900000000 + GITHUB_RUN_NUMBER))
+
+          has_credentials=false
+          if [ -n "${TELEGRAM_API_ID:-}" ] && [ -n "${TELEGRAM_API_HASH:-}" ]; then
+            has_credentials=true
+          else
+            echo "::warning::TELEGRAM_API_ID / TELEGRAM_API_HASH are not set; the app will build but cannot log in"
+          fi
+
+          {
+            echo "upstream_ref=$ref"
+            echo "version=$version"
+            echo "build_name=$build_name"
+            echo "version_code=$version_code"
+            echo "application_id=$application_id"
+            echo "app_name=$app_name"
+            echo "skip=$skip"
+            echo "has_credentials=$has_credentials"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "building $ref as $build_name (versionCode $version_code, $application_id)"
+
+  build:
+    name: Build ${{ matrix.abi }}
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            target: android-arm64
+          - abi: armeabi-v7a
+            target: android-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: builder
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.resolve.outputs.upstream_ref }}
+          path: src
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Disable Flutter split-ABI versionCode offsets
+        # Both ABIs must carry the same versionCode, otherwise the app sees a
+        # different build number depending on which device installed it.
+        run: |
+          constants="$FLUTTER_ROOT/packages/flutter_tools/gradle/src/main/kotlin/FlutterPluginConstants.kt"
+          python3 - "$constants" <<'PY'
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          text = path.read_text()
+          replacements = {
+              "ARCH_ARM32 to 1": "ARCH_ARM32 to 0",
+              "ARCH_ARM64 to 2": "ARCH_ARM64 to 0",
+              "ARCH_X86_64 to 4": "ARCH_X86_64 to 0",
+          }
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f"Could not find {old!r} in {path}")
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+          grep -A8 'ABI_VERSION =' "$constants"
+
+      - name: Install Android NDK 28.2.13676358
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" >/dev/null 2>&1 || \
+          yes | sdkmanager "ndk;28.2.13676358" >/dev/null 2>&1 || true
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Cache tdjson (${{ matrix.abi }})
+        uses: actions/cache@v4
+        with:
+          path: src/android/app/src/main/jniLibs/${{ matrix.abi }}
+          key: tdjson-android-${{ runner.os }}-${{ matrix.abi }}-${{ hashFiles('src/scripts/tdjson-manifest.json') }}
+
+      - name: Install pinned tdjson (${{ matrix.abi }})
+        run: ./src/scripts/build-tdjson-android.sh "${{ matrix.abi }}"
+
+      - name: Apply this build's patches
+        run: |
+          python3 builder/patches/apply.py \
+            --src src \
+            --application-id '${{ needs.resolve.outputs.application_id }}' \
+            --app-name '${{ needs.resolve.outputs.app_name }}' \
+            --update-owner '${{ github.repository_owner }}' \
+            --update-repo '${{ github.event.repository.name }}' \
+            --version-code '${{ needs.resolve.outputs.version_code }}'
+
+      - name: Flutter dependencies
+        working-directory: src
+        run: flutter pub get
+
+      - name: Write secrets.dart
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          mkdir -p src/lib/config
+          cat > src/lib/config/secrets.dart <<EOF
+          class Secrets {
+            static const int apiId = ${TELEGRAM_API_ID:-0};
+            static const String apiHash = '${TELEGRAM_API_HASH}';
+            static bool get isConfigured => apiId != 0 && apiHash.isNotEmpty;
+          }
+          EOF
+
+      - name: Decode signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          : "${KEYSTORE_B64:?set ANDROID_KEYSTORE_BASE64 in repository secrets}"
+          : "${STORE_PASSWORD:?set ANDROID_KEYSTORE_PASSWORD in repository secrets}"
+          : "${KEY_ALIAS:?set ANDROID_KEY_ALIAS in repository secrets}"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > src/android/app/upload-keystore.jks
+          cat > src/android/key.properties <<EOF
+          storePassword=$STORE_PASSWORD
+          keyPassword=${KEY_PASSWORD:-$STORE_PASSWORD}
+          keyAlias=$KEY_ALIAS
+          storeFile=upload-keystore.jks
+          EOF
+
+      - name: Build ${{ matrix.abi }} release APK
+        working-directory: src
+        run: |
+          flutter build apk --release --split-per-abi \
+            --dart-define="I_DONT_FUCKING_CARE_ABOUT_TOS=false" \
+            --target-platform ${{ matrix.target }} \
+            --build-name="${{ needs.resolve.outputs.build_name }}" \
+            --build-number="${{ needs.resolve.outputs.version_code }}" \
+            --dart-define="GIT_COMMIT=${{ needs.resolve.outputs.upstream_ref }}" \
+            --dart-define="CI_BUILD_STAMP=${{ needs.resolve.outputs.build_name }}"
+
+      - name: Verify APK identity
+        run: |
+          set -euo pipefail
+          apk="src/build/app/outputs/flutter-apk/app-${{ matrix.abi }}-release.apk"
+          analyzer="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+          [ -x "$analyzer" ] || analyzer="$(command -v apkanalyzer)"
+          actual_name="$("$analyzer" manifest version-name "$apk")"
+          actual_code="$("$analyzer" manifest version-code "$apk")"
+          actual_package="$("$analyzer" manifest application-id "$apk")"
+          [ "$actual_name" = '${{ needs.resolve.outputs.build_name }}' ] || {
+            echo "unexpected versionName: $actual_name" >&2; exit 1; }
+          [ "$actual_code" = '${{ needs.resolve.outputs.version_code }}' ] || {
+            echo "unexpected versionCode: $actual_code" >&2; exit 1; }
+          [ "$actual_package" = '${{ needs.resolve.outputs.application_id }}' ] || {
+            echo "unexpected applicationId: $actual_package" >&2; exit 1; }
+          echo "identity ok: $actual_package $actual_name ($actual_code)"
+
+      - name: Verify APK signing certificate
+        run: |
+          set -euo pipefail
+          apk="src/build/app/outputs/flutter-apk/app-${{ matrix.abi }}-release.apk"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -perm -u+x | sort -V | tail -n 1)"
+          test -x "$apksigner"
+          "$apksigner" verify --print-certs "$apk" | sed -n '1,12p'
+
+      - name: Stage APK
+        run: |
+          mkdir -p dist
+          cp "src/build/app/outputs/flutter-apk/app-${{ matrix.abi }}-release.apk" \
+            "dist/mithka-${{ needs.resolve.outputs.build_name }}-android-${{ matrix.abi }}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ matrix.abi }}
+          path: dist/*.apk
+          if-no-files-found: error
+
+  release:
+    name: Publish
+    needs: [resolve, build]
+    if: needs.resolve.outputs.skip != 'true' && needs.resolve.outputs.has_credentials == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Build release manifest
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+
+          files = {}
+          for path in sorted(pathlib.Path('.').glob('*.apk')):
+              data = path.read_bytes()
+              files[path.name] = {
+                  'sha256': hashlib.sha256(data).hexdigest(),
+                  'size': len(data),
+              }
+          manifest = {
+              'schema_version': 1,
+              'version': os.environ['BUILD_NAME'],
+              'android_version_code': int(os.environ['VERSION_CODE']),
+              'upstream': os.environ['UPSTREAM_REF'],
+              'files': files,
+          }
+          pathlib.Path('update.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps(manifest, indent=2))
+          PY
+        env:
+          BUILD_NAME: ${{ needs.resolve.outputs.build_name }}
+          VERSION_CODE: ${{ needs.resolve.outputs.version_code }}
+          UPSTREAM_REF: ${{ needs.resolve.outputs.upstream_ref }}
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_NAME: ${{ needs.resolve.outputs.build_name }}
+          UPSTREAM_REF: ${{ needs.resolve.outputs.upstream_ref }}
+          APPLICATION_ID: ${{ needs.resolve.outputs.application_id }}
+        run: |
+          set -euo pipefail
+          notes="$(printf '%s\n' \
+            "- 基于 \`$UPSTREAM_REF\` 构建" \
+            "- 包名 \`$APPLICATION_ID\`" \
+            "- 应用内可直接下载并安装本次更新")"
+          gh release create "v$BUILD_NAME" \
+            --title "Mithka $BUILD_NAME" \
+            --notes "$notes" \
+            --latest \
+            dist/*.apk dist/update.json

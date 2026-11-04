@@ -1,0 +1,5 @@
+# Signing material never lands in the repo; CI reads it from secrets.
+*.jks
+*.keystore
+keystore.properties
+key.properties
