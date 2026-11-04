@@ -100,8 +100,10 @@ jobs:
 
           build_name="$version.$((seq + 1))"
 
+          # Only the scheduled sweep skips an already-built upstream version.
+          # A manual run is always an explicit request to rebuild.
           skip=false
-          if [ -z "${INPUT_REF:-}" ] && [ "$seq" -gt 0 ]; then
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ -z "${INPUT_REF:-}" ] && [ "$seq" -gt 0 ]; then
             echo "upstream $ref already built as v$version.$seq; nothing to do"
             skip=true
           fi
