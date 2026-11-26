@@ -172,15 +172,12 @@ def patch_update_checker(src: pathlib.Path) -> None:
     if (asset == null) return UpdateCheckOutcome.unavailable;
     if (!context.mounted) return UpdateCheckOutcome.updateAvailable;
 
-    final ok = await confirmDialog(
+    final ok = await showUpdatePromptDialog(
       context,
       title: AppStrings.t(AppStringKeys.updateNewVersionFound),
-      message: AppStrings.t(AppStringKeys.updateVersionPrompt, {
-        'value1': current,
-        'value2': release.version,
-      }),
+      current: current,
+      latest: release.version,
       confirmText: AppStrings.t(AppStringKeys.updateAction),
-      cancelText: AppStrings.t(AppStringKeys.updateLater),
     );
     if (!ok || !context.mounted) return UpdateCheckOutcome.updateAvailable;
     await runAndroidApkUpdate(context, asset: asset, version: release.version);

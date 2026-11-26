@@ -19,7 +19,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
-import '../chat/file_opener.dart';
+import '../chat/media/file_opener.dart';
 import '../components/app_dialog.dart';
 import '../components/ui_components.dart';
 import '../l10n/app_localizations.dart';
